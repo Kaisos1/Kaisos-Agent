@@ -1,0 +1,20 @@
+# Agent runtime state — never commit (may contain tokens, pairings, your data)
+.agent/
+**/.agent/
+*.tmp.*
+
+# Secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
