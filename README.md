@@ -176,10 +176,18 @@ agent stops rediscovering your deploy steps and conventions.
 
 ## Scheduling
 
-`"in 30 minutes"` · `"every 2 hours"` · `"every day at 09:00"` ·
+`"in 30 minutes"` · `"every 2 hours"` · `"every 3 days"` · `"every day at 09:00"` ·
+`"every weekday at 09:00"` · `"every monday at 18:00"` · `"tomorrow at 08:00"` ·
 `"once at 2026-07-01 18:00"` — natural-language jobs persist in `.agent/jobs.json`,
 run with fresh context in the daemon, log to `.agent/jobs.log`, and notify via
 Telegram or desktop.
+
+Every run records its outcome on the job: `list_scheduled` (and the dashboard)
+show each job's run/fail counts and last-run time. A **recurring job that fails
+`AGENT_MAX_JOB_FAILS` times in a row (default 5) auto-disables itself** and sends
+one notification — no silent loop burning tokens. Fire any job on demand with the
+`run_job` tool, the dashboard's **▸** button, or `--run-job <id>` (a manual success
+re-enables a disabled job). Poll cadence is `AGENT_TICK_SEC` (default 20s).
 
 ## Telegram
 
@@ -273,6 +281,7 @@ Env: `ANTHROPIC_API_KEY` `AGENT_MODEL` `AGENT_OLLAMA_MODEL` `OLLAMA_HOST`
 `TELEGRAM_BOT_TOKEN` `AGENT_COMPACT_TOKENS` `AGENT_HEARTBEAT_MIN` `AGENT_NUM_CTX`
 `ANTHROPIC_BASE_URL` `TELEGRAM_API_BASE` `AGENT_DASH_PORT` `AGENT_DASH_BIND`
 `AGENT_FALLBACK_LOCAL` `AGENT_BRAND` `AGENT_DAILY_BUDGET` `AGENT_DAEMON_MODEL`
+`AGENT_TICK_SEC` `AGENT_MAX_JOB_FAILS`
 `WHATSAPP_TOKEN` `WHATSAPP_PHONE_ID` `WHATSAPP_VERIFY_TOKEN` `WHATSAPP_APP_SECRET`
 `WHATSAPP_API_BASE`
 
@@ -280,7 +289,7 @@ Env: `ANTHROPIC_API_KEY` `AGENT_MODEL` `AGENT_OLLAMA_MODEL` `OLLAMA_HOST`
 
 17 built-in: read_file · read_image · write_file · edit_file · list_dir ·
 search_files · run_command · fetch_url · web_search · remember · save_skill ·
-read_skill · search_memory · delegate · schedule_task · watch_path ·
+read_skill · search_memory · delegate · schedule_task · watch_path · run_job ·
 list_scheduled · cancel_scheduled — **plus anything your MCP servers expose.**
 
 ## Honest limitations

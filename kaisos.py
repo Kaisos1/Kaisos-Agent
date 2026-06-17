@@ -11,7 +11,10 @@ in a loop until the task is done. Anthropic API or fully-local Ollama.
               After each interactive session the agent also reflects automatically
               and saves up to 3 [auto] facts (disable with --no-reflect).
   skills      Reusable how-tos it saves for itself in .agent/skills/.
-  schedule    "every day at 09:00", "in 2 hours" — runs unattended in --daemon mode.
+  schedule    "every day at 09:00", "every weekday at 09:00", "every monday at 18:00",
+              "every 3 days", "tomorrow at 08:00", "in 2 hours" — runs unattended in
+              --daemon mode. Jobs track run/fail counts; a recurring one that fails 5×
+              in a row auto-disables. Fire any job now with --run-job <id>.
   watchers    "whenever demos/*.wav changes, normalize the filenames" — the daemon
               polls for file changes and fires the task automatically.
   heartbeat   Standing instructions in .agent/HEARTBEAT.md, checked every 30 min
@@ -48,6 +51,8 @@ Quick start:
   python3 kaisos.py -p "task" --yes          # one-shot, no questions
   python3 kaisos.py --daemon                 # automation + dashboard at :8484
   python3 kaisos.py --install-service        # make the daemon permanent
+  python3 kaisos.py --list-jobs              # show jobs/watches with run stats
+  python3 kaisos.py --run-job <id>           # run one job now, then exit
 
 State lives in <workspace>/.agent/ — plain text, yours to read and edit.
 Current Claude model ids: https://platform.claude.com/docs/en/about-claude/models/overview
@@ -99,6 +104,8 @@ MEMORY_CHARS = 4_000         # how much of memory.md gets injected
 DIFF_LINES = 80              # max preview lines in confirmations
 NUM_CTX = int(os.environ.get("AGENT_NUM_CTX", 8192))
 HEARTBEAT_MIN = int(os.environ.get("AGENT_HEARTBEAT_MIN", 30))   # 0 disables
+TICK_SEC = max(5, int(os.environ.get("AGENT_TICK_SEC", 20)))     # daemon poll interval
+MAX_JOB_FAILS = max(1, int(os.environ.get("AGENT_MAX_JOB_FAILS", 5)))  # auto-disable recurring job after N consecutive failures
 MAX_WATCHES = 10
 PARALLEL_TOOLS = 4
 DASH_PORT = int(os.environ.get("AGENT_DASH_PORT", 8484))
@@ -134,9 +141,11 @@ Working style:
   next session can `read_skill` instead of rediscovering it.
 - For broad research across several independent questions, use `delegate` to run
   read-only subagents in parallel and keep this conversation lean.
-- Use `schedule_task` for things that should happen later or repeatedly, and `watch_path`
-  for things that should happen whenever certain files change (both require the daemon
-  to be running; --install-service makes it permanent).
+- Use `schedule_task` for things that should happen later or repeatedly ("in 30 minutes",
+  "every 3 days", "every weekday at 09:00", "every monday at 18:00", "tomorrow at 08:00"),
+  and `watch_path` for things that should happen whenever certain files change. Both require
+  the daemon (--install-service makes it permanent). `run_job` fires one on demand;
+  `list_scheduled` shows each job's run/fail counts.
 - Use `read_image` to look at screenshots, photos, or design files when relevant.
 - When the task is complete, give a short summary of what you did and where things are.
 - Be concise. Plain text replies; no markdown tables or heavy formatting.{git}{memory}{skills}"""
@@ -728,32 +737,73 @@ def t_delegate(tasks) -> str:
 
 # ── scheduling + watchers (shared jobs.json store) ───────────────────
 
+_WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6,
+             "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3,
+             "thurs": 3, "fri": 4, "sat": 5, "sun": 6}
+
+def _next_at(h, mi, now, days_set=None):
+    """Next timestamp at h:mi. If days_set given, only on those weekdays (0=Mon)."""
+    nxt = datetime.fromtimestamp(now).replace(hour=h, minute=mi, second=0, microsecond=0)
+    if nxt.timestamp() <= now:
+        nxt += timedelta(days=1)
+    if days_set:
+        for _ in range(8):
+            if nxt.weekday() in days_set:
+                break
+            nxt += timedelta(days=1)
+    return nxt.timestamp()
+
 def parse_when(spec: str) -> dict:
     s = " ".join(spec.lower().split())
     now = time.time()
-    m = re.fullmatch(r"in (\d+) (minute|hour|day)s?", s)
+    base = {"recurring": False, "interval": None, "daily": None,
+            "weekly": None, "weekdays_only": False}
+    m = re.fullmatch(r"in (\d+) (second|minute|hour|day)s?", s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        sec = n * {"second": 1, "minute": 60, "hour": 3600, "day": 86400}[unit]
+        return {**base, "next": now + sec}
+    m = re.fullmatch(r"every (\d+) (minute|hour|day)s?", s)
     if m:
         n, unit = int(m.group(1)), m.group(2)
         sec = n * {"minute": 60, "hour": 3600, "day": 86400}[unit]
-        return {"recurring": False, "interval": None, "daily": None, "next": now + sec}
-    m = re.fullmatch(r"every (\d+) (minute|hour)s?", s)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)
-        sec = n * {"minute": 60, "hour": 3600}[unit]
         if sec < 60:
             raise ToolError("Minimum interval is 1 minute.")
-        return {"recurring": True, "interval": sec, "daily": None, "next": now + sec}
+        return {**base, "recurring": True, "interval": sec, "next": now + sec}
     if s == "every hour":
-        return {"recurring": True, "interval": 3600, "daily": None, "next": now + 3600}
+        return {**base, "recurring": True, "interval": 3600, "next": now + 3600}
+    if s in ("every minute",):
+        return {**base, "recurring": True, "interval": 60, "next": now + 60}
     m = re.fullmatch(r"every day at (\d{1,2}):(\d{2})", s)
     if m:
         h, mi = int(m.group(1)), int(m.group(2))
         if not (0 <= h < 24 and 0 <= mi < 60):
             raise ToolError("Bad time of day.")
-        nxt = datetime.now().replace(hour=h, minute=mi, second=0, microsecond=0)
-        if nxt.timestamp() <= now:
-            nxt += timedelta(days=1)
-        return {"recurring": True, "interval": None, "daily": [h, mi], "next": nxt.timestamp()}
+        return {**base, "recurring": True, "daily": [h, mi], "next": _next_at(h, mi, now)}
+    m = re.fullmatch(r"every weekday at (\d{1,2}):(\d{2})", s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if not (0 <= h < 24 and 0 <= mi < 60):
+            raise ToolError("Bad time of day.")
+        return {**base, "recurring": True, "daily": [h, mi], "weekdays_only": True,
+                "next": _next_at(h, mi, now, {0, 1, 2, 3, 4})}
+    m = re.fullmatch(r"every (\w+) at (\d{1,2}):(\d{2})", s)
+    if m and m.group(1) in _WEEKDAYS:
+        dow = _WEEKDAYS[m.group(1)]
+        h, mi = int(m.group(2)), int(m.group(3))
+        if not (0 <= h < 24 and 0 <= mi < 60):
+            raise ToolError("Bad time of day.")
+        return {**base, "recurring": True, "weekly": [dow, h, mi],
+                "next": _next_at(h, mi, now, {dow})}
+    m = re.fullmatch(r"tomorrow at (\d{1,2}):(\d{2})", s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if not (0 <= h < 24 and 0 <= mi < 60):
+            raise ToolError("Bad time of day.")
+        nxt = (datetime.fromtimestamp(now) + timedelta(days=1)).replace(
+            hour=h, minute=mi, second=0, microsecond=0)
+        return {**base, "next": nxt.timestamp()}
     m = re.fullmatch(r"(?:once )?at (\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2})", s)
     if m:
         y, mo, d, h, mi = map(int, m.groups())
@@ -763,9 +813,11 @@ def parse_when(spec: str) -> dict:
             raise ToolError(f"Bad datetime: {e}")
         if nxt <= now:
             raise ToolError("That time is in the past.")
-        return {"recurring": False, "interval": None, "daily": None, "next": nxt}
+        return {**base, "next": nxt}
     raise ToolError('Unrecognized schedule. Use: "in 30 minutes", "every 2 hours", '
-                    '"every day at 09:00", or "once at 2026-06-12 18:00".')
+                    '"every 3 days", "every day at 09:00", "every weekday at 09:00", '
+                    '"every monday at 09:00", "tomorrow at 18:00", '
+                    'or "once at 2026-06-12 18:00".')
 
 def _load_jobs() -> list:
     try:
@@ -819,14 +871,27 @@ def t_watch_path(pattern: str, task: str) -> str:
     return (f"Watching [{job['id']}] '{pattern}' ({len(state)} files baseline). "
             f"When files change, the daemon runs: {job['task'][:80]}")
 
+def _job_stat(j) -> str:
+    if not j.get("runs"):
+        return ""
+    mark = "✓" if j.get("last_ok", True) else "✗"
+    s = f" · {mark} {j['runs']}r"
+    if j.get("fails"):
+        s += f"/{j['fails']}f"
+    if j.get("last_run"):
+        s += f" · last {_fmt_ts(j['last_run'])}"
+    return s
+
 def t_list_scheduled() -> str:
     jobs = _load_jobs()
     sched = sorted((j for j in jobs if j.get("kind", "schedule") == "schedule"),
                    key=lambda j: j["next"])
     watch = [j for j in jobs if j.get("kind") == "watch"]
-    rows = [f"[{j['id']}] next {_fmt_ts(j['next'])} · {j['when']} · {j['task'][:90]}"
+    rows = [f"[{j['id']}]{' DISABLED' if j.get('disabled') else ''} "
+            f"next {_fmt_ts(j['next'])} · {j['when']} · {j['task'][:90]}{_job_stat(j)}"
             for j in sched]
-    rows += [f"[{j['id']}] WATCH {j['pattern']} ({len(j.get('state', {}))} files) · {j['task'][:80]}"
+    rows += [f"[{j['id']}] WATCH {j['pattern']} ({len(j.get('state', {}))} files) · "
+             f"{j['task'][:80]}{_job_stat(j)}"
              for j in watch]
     return "\n".join(rows) if rows else "No scheduled jobs or watches."
 
@@ -838,6 +903,39 @@ def t_cancel_scheduled(job_id: str) -> str:
         return keep
     _mutate_jobs(_drop)
     return f"Cancelled [{job_id}]."
+
+def t_run_job(job_id: str, notify=None) -> str:
+    """Run a scheduled job or watch's task right now, regardless of its schedule.
+    A successful manual run clears a disabled job's failure streak and resumes it
+    on its normal cadence (without firing again immediately). For a watch, the
+    file baseline is refreshed so the change isn't re-detected and re-run."""
+    job = next((j for j in _load_jobs() if j["id"] == job_id), None)
+    if not job:
+        raise ToolError(f"No job or watch with id {job_id}.")
+    out, ok = run_background(job["task"], f"manual {job_id}", notify)
+    new_state = None
+    if job.get("kind") == "watch":
+        try:
+            new_state = _glob_snapshot(job["pattern"])
+        except OSError:
+            new_state = None
+
+    def _settle(jobs, _id=job_id, _ok=ok, _out=out, _st=new_state):
+        for j in jobs:
+            if j["id"] != _id:
+                continue
+            if _ok is not None:
+                _account(j, _ok, _out)
+            if _st is not None:                      # consume any pending watch diff
+                j["state"] = _st
+                _WATCH_PREV.pop(_id, None)
+            if _ok is True and j.pop("disabled", None) and j.get("recurring"):
+                _reschedule(j)                       # resume cadence; don't refire now
+            break
+        return jobs
+    _mutate_jobs(_settle)
+    status = "ran" if ok else ("skipped (budget)" if ok is None else "failed")
+    return f"[{job_id}] {status}.\n{out[-1500:]}"
 
 # ════════════════════════════════════════════════════════════════════
 #  TOOL REGISTRY
@@ -899,9 +997,12 @@ TOOLS = {
         "Run read-only subagents in parallel (fresh context each); returns their reports.")),
     "schedule_task": (t_schedule_task, True, _schema(
         {"when": {"type": "string",
-                  "description": '"in 30 minutes" | "every 2 hours" | "every day at 09:00" | "once at YYYY-MM-DD HH:MM"'},
+                  "description": '"in 30 minutes" | "every 2 hours" | "every 3 days" | "every day at 09:00" | "every weekday at 09:00" | "every monday at 09:00" | "tomorrow at 18:00" | "once at YYYY-MM-DD HH:MM"'},
          "task": {"type": "string"}}, ["when", "task"],
         "Schedule a task for the daemon to run later (one-off or recurring).")),
+    "run_job": (t_run_job, True, _schema(
+        {"job_id": {"type": "string"}}, ["job_id"],
+        "Run a scheduled job or watch's task right now (re-enables a disabled one on success).")),
     "watch_path":   (t_watch_path, True, _schema(
         {"pattern": {"type": "string",
                      "description": "glob relative to workspace, e.g. 'demos/*.wav' or 'src/**/*.py'"},
@@ -1482,25 +1583,29 @@ def run_task(backend, user_text, io, allowed=None, max_steps=MAX_STEPS):
 def run_background(task: str, tag: str, notify=None):
     """Run one unattended task with a fresh backend. Budget-capped, optionally
     routed to a cheaper model (AGENT_DAEMON_MODEL), optionally retried on local
-    Ollama (--fallback-local). Logs and notifies."""
+    Ollama (--fallback-local). Logs and notifies. Returns (output, ok) where ok
+    is True (success), False (failed), or None (skipped — budget hit)."""
     if DAILY_BUDGET:
         u = _usage_today()
         if u.get("in", 0) + u.get("out", 0) >= DAILY_BUDGET:
             out = (f"(skipped: daily token budget of {DAILY_BUDGET:,} reached — "
                    f"automation resumes tomorrow, or raise AGENT_DAILY_BUDGET)")
-            job_log(tag + " budget", task, out)
-            if notify and not u.get("budget_note"):
-                _usage_add(budget_note=True)     # notify once per day, not per tick
-                notify("⛔ " + out)
-            return out
+            if not u.get("budget_note"):         # log + notify once per day, not per tick
+                _usage_add(budget_note=True)
+                job_log(tag + " budget", task, out)
+                if notify:
+                    notify("⛔ " + out)
+            return out, None
     io = AutoIO()
     used_fallback = False
+    ok = True
     try:
         backend = BACKEND_FACTORY(ALL_TOOLS,
                                   model=os.environ.get("AGENT_DAEMON_MODEL") or None)
         run_task(backend, task, io)
         out = io.transcript() or "(no output)"
     except Exception as e:
+        ok = False
         if FALLBACK_LOCAL and ollama_alive():
             try:
                 io = AutoIO()
@@ -1509,6 +1614,7 @@ def run_background(task: str, tag: str, notify=None):
                 out = (f"(completed via local fallback after primary failure: {e})\n"
                        + (io.transcript() or "(no output)"))
                 used_fallback = True
+                ok = True
             except Exception as e2:
                 out = f"({tag} failed: {e}; local fallback also failed: {e2})"
         else:
@@ -1516,8 +1622,8 @@ def run_background(task: str, tag: str, notify=None):
     _usage_add(tasks=1)
     job_log(tag + (" fallback" if used_fallback else ""), task, out)
     if notify:
-        notify(f"⏰ {task[:120]}\n\n{out[-3000:]}")
-    return out
+        notify(f"{'⏰' if ok else '⚠️'} {task[:120]}\n\n{out[-3000:]}")
+    return out, ok
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1527,31 +1633,59 @@ def run_background(task: str, tag: str, notify=None):
 def _reschedule(job):
     now = time.time()
     if job.get("interval"):
-        job["next"] = now + job["interval"]
+        # anchor to schedule, not run time: catch up past missed slots without drift
+        nxt = job.get("next", now) + job["interval"]
+        if nxt <= now:
+            nxt = now + job["interval"]
+        job["next"] = nxt
+    elif job.get("weekly"):
+        dow, h, mi = job["weekly"]
+        job["next"] = _next_at(h, mi, now, {dow})
     elif job.get("daily"):
         h, mi = job["daily"]
-        nxt = datetime.now().replace(hour=h, minute=mi, second=0, microsecond=0)
-        while nxt.timestamp() <= now:
-            nxt += timedelta(days=1)
-        job["next"] = nxt.timestamp()
+        days = {0, 1, 2, 3, 4} if job.get("weekdays_only") else None
+        job["next"] = _next_at(h, mi, now, days)
+
+def _account(job, ok, msg):
+    """Fold one run's outcome into a job's persistent counters (in place)."""
+    job["last_run"] = time.time()
+    job["last_msg"] = " ".join((msg or "").split())[:140]
+    job["runs"] = job.get("runs", 0) + 1
+    if ok is False:
+        job["last_ok"] = False
+        job["fails"] = job.get("fails", 0) + 1
+        job["cfails"] = job.get("cfails", 0) + 1
+    elif ok is True:
+        job["last_ok"] = True
+        job["cfails"] = 0
 
 def run_due_jobs(notify=None) -> int:
     """Run all due scheduled jobs. Each completion mutates jobs.json freshly,
     so tasks that themselves schedule/cancel jobs are never clobbered."""
     now = time.time()
     due = [j for j in _load_jobs()
-           if j.get("kind", "schedule") == "schedule" and j["next"] <= now]
+           if j.get("kind", "schedule") == "schedule"
+           and not j.get("disabled") and j["next"] <= now]
     for job in due:
-        run_background(job["task"], job["id"], notify)
+        out, ok = run_background(job["task"], job["id"], notify)
 
-        def _settle(jobs, _id=job["id"]):
+        def _settle(jobs, _id=job["id"], _ok=ok, _out=out):
             for j in jobs:
-                if j["id"] == _id:
-                    if j.get("recurring"):
-                        _reschedule(j)
-                    else:
-                        jobs.remove(j)
-                    break
+                if j["id"] != _id:
+                    continue
+                if _ok is None:                      # budget skip — leave as-is, retry later
+                    return jobs
+                _account(j, _ok, _out)
+                if not j.get("recurring"):
+                    jobs.remove(j)
+                elif j.get("cfails", 0) >= MAX_JOB_FAILS:
+                    j["disabled"] = True             # stop a runaway failing job (and its cost)
+                    if notify:
+                        notify(f"🛑 disabled [{_id}] after {j['cfails']} consecutive "
+                               f"failures: {j['task'][:80]}\nLast: {j.get('last_msg','')}")
+                else:
+                    _reschedule(j)
+                break
             return jobs
         _mutate_jobs(_settle)
     return len(due)
@@ -1583,12 +1717,14 @@ def run_watches(notify=None) -> int:
         task = (job["task"] + "\n(Triggered by file changes: "
                 + ", ".join(changed[:20])
                 + (f" … +{len(changed)-20} more" if len(changed) > 20 else "") + ")")
-        run_background(task, f"watch {job['id']}", notify)
+        out, ok = run_background(task, f"watch {job['id']}", notify)
 
-        def _upd(jobs, _id=job["id"], _cur=cur):
+        def _upd(jobs, _id=job["id"], _cur=cur, _ok=ok, _out=out):
             for j in jobs:
                 if j["id"] == _id:
                     j["state"] = _cur
+                    if _ok is not None:
+                        _account(j, _ok, _out)
                     break
             return jobs
         _mutate_jobs(_upd)
@@ -1609,7 +1745,7 @@ def process_inbox(notify=None) -> int:
         if not task:
             continue
         ran += 1
-        run_background(task, f"inbox {p.name}", notify)
+        run_background(task, f"inbox {p.name}", notify)   # ephemeral; logged via job_log
     return ran
 
 def _heartbeat_instructions() -> str:
@@ -1642,8 +1778,8 @@ def run_heartbeat(notify=None, force=False) -> bool:
             "them now and act only if something actually needs doing:\n\n"
             + instructions +
             "\n\nIf nothing needs doing right now, reply with exactly: HEARTBEAT_OK")
-    out = run_background(task, "heartbeat", None)
-    if notify and "HEARTBEAT_OK" not in out:
+    out, _ok = run_background(task, "heartbeat", None)
+    if notify and _ok is not None and "HEARTBEAT_OK" not in out:
         notify("🫀 heartbeat:\n" + out[-3000:])
     return True
 
@@ -1811,10 +1947,14 @@ def _dash_state() -> dict:
         "heartbeat": {"minutes": HEARTBEAT_MIN, "last": hb_last,
                       "active": bool(_heartbeat_instructions())},
         "jobs": [{"id": j["id"], "when": j.get("when", ""), "next": j.get("next", 0),
-                  "task": j.get("task", "")[:140]}
+                  "task": j.get("task", "")[:140], "runs": j.get("runs", 0),
+                  "fails": j.get("fails", 0), "ok": j.get("last_ok", True),
+                  "disabled": bool(j.get("disabled"))}
                  for j in jobs if j.get("kind", "schedule") == "schedule"],
         "watches": [{"id": j["id"], "pattern": j.get("pattern", ""),
-                     "files": len(j.get("state", {})), "task": j.get("task", "")[:140]}
+                     "files": len(j.get("state", {})), "task": j.get("task", "")[:140],
+                     "runs": j.get("runs", 0), "fails": j.get("fails", 0),
+                     "ok": j.get("last_ok", True)}
                     for j in jobs if j.get("kind") == "watch"],
         "mcp": [{"name": n, "transport": c.transport, "alive": c.alive(),
                  "tools": sum(1 for t in TOOLS
@@ -1978,12 +2118,15 @@ $("hb").innerHTML=`<b>interval</b><span>${st.heartbeat.minutes>0?"every "+st.hea
 <b>last check</b><span class="muted">${ts(st.heartbeat.last)}</span>
 <b>next</b><span>${st.heartbeat.minutes>0&&nb!==null?(nb>0?"in "+ago(nb):"due now"):"—"}</span>`;
 $("jn").textContent=st.jobs.length;
-$("jobs").innerHTML=st.jobs.map(j=>`<li><span class="chip">${esc(j.id)}</span><span>${esc(j.task)}<br>
-<span class="muted">next ${ts(j.next)} · ${esc(j.when)}</span></span>
+const jstat=j=>j.runs?` · ${j.ok?'✓':'✗'} ${j.runs}r${j.fails?'/'+j.fails+'f':''}`:'';
+$("jobs").innerHTML=st.jobs.map(j=>`<li><span class="chip">${esc(j.id)}</span><span>${esc(j.task)}${j.disabled?' <span class="gold">[disabled]</span>':''}<br>
+<span class="muted">next ${ts(j.next)} · ${esc(j.when)}${jstat(j)}</span></span>
+<span class="x" title="run now" onclick="act('run','${esc(j.id)}')">▸</span>
 <span class="x" onclick="act('cancel','${esc(j.id)}')">✕</span></li>`).join("")||'<li class="empty">nothing scheduled</li>';
 $("wn").textContent=st.watches.length;
 $("watches").innerHTML=st.watches.map(w=>`<li><span class="chip">${esc(w.id)}</span><span><span class="gold">${esc(w.pattern)}</span>
-<span class="muted">(${w.files} files)</span><br>${esc(w.task)}</span>
+<span class="muted">(${w.files} files)${jstat({runs:w.runs,fails:w.fails,ok:w.ok})}</span><br>${esc(w.task)}</span>
+<span class="x" title="run now" onclick="act('run','${esc(w.id)}')">▸</span>
 <span class="x" onclick="act('cancel','${esc(w.id)}')">✕</span></li>`).join("")||'<li class="empty">no watches</li>';
 $("mcp").innerHTML=st.mcp.map(m=>`<li><span class="gold">${esc(m.name)}</span> <span class="muted">· ${m.transport} · ${m.tools} tools · ${m.alive?"up":"<b>down</b>"}</span></li>`).join("")||'<li class="empty">none configured</li>';
 $("skills").innerHTML=st.skills?.map(s=>`<li><span class="gold">${esc(s.name)}</span> <span class="muted">— ${esc(s.desc)}</span></li>`).join("")||'<li class="empty">none saved yet</li>';
@@ -2136,6 +2279,9 @@ class DashHandler(BaseHTTPRequestHandler):
         try:
             if do == "cancel" and jid:
                 return {"ok": True, "msg": t_cancel_scheduled(jid)}
+            if do == "run" and jid:
+                threading.Thread(target=t_run_job, args=(jid,), daemon=True).start()
+                return {"ok": True, "msg": f"running [{jid}] now"}
             if do == "pause":
                 AUTOMATION_PAUSED = True
                 return {"ok": True, "msg": "automation paused"}
@@ -2203,6 +2349,7 @@ _SERVICE_ENV_KEYS = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "OLLAMA_HOST",
                      "AGENT_HEARTBEAT_MIN", "AGENT_NUM_CTX",
                      "AGENT_FALLBACK_LOCAL", "AGENT_DASH_PORT", "AGENT_BRAND",
                      "AGENT_DAEMON_MODEL", "AGENT_DAILY_BUDGET", "AGENT_DASH_BIND",
+                     "AGENT_TICK_SEC", "AGENT_MAX_JOB_FAILS",
                      "AGENT_DASH_PUBLIC", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID",
                      "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_API_BASE")
 
@@ -3146,6 +3293,10 @@ def main():
     ap.add_argument("--install-service", action="store_true",
                     help="register the daemon with systemd/launchd/Task Scheduler")
     ap.add_argument("--uninstall-service", action="store_true", help="remove the daemon service")
+    ap.add_argument("--list-jobs", action="store_true",
+                    help="print scheduled jobs and watches (with run stats), then exit")
+    ap.add_argument("--run-job", metavar="ID",
+                    help="run a scheduled job/watch by id right now, then exit")
     args = ap.parse_args()
 
     if args.workspace:
@@ -3162,6 +3313,9 @@ def main():
         sys.exit(uninstall_service())
     if args.install_service:
         sys.exit(install_service())
+    if args.list_jobs:
+        print(t_list_scheduled())
+        sys.exit(0)
 
     if not args.no_mcp:
         if load_mcp_servers():
@@ -3198,6 +3352,14 @@ def main():
               f"skills: {n_skills} · jobs: {len(jobs) - n_watch} · watches: {n_watch} · mcp: {n_mcp}"
               + (" · resumed previous session" if resumed else "")))
 
+    if args.run_job:
+        try:
+            print(t_run_job(args.run_job))
+        except ToolError as e:
+            print(red(str(e)))
+            sys.exit(1)
+        return
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if args.daemon or args.telegram:
         if args.daemon and not heartbeat_path().exists():
@@ -3229,7 +3391,7 @@ def main():
             try:
                 while True:
                     daemon_tick(notify=_bg_notify)
-                    time.sleep(20)
+                    time.sleep(TICK_SEC)
             except KeyboardInterrupt:
                 print(dim("\nbye"))
         return
