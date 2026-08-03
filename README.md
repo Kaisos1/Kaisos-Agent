@@ -255,6 +255,37 @@ workspace for `read_image`. Commands: `/reset` `/jobs` `/undo` `/usage` `/quit`.
 `delegate` runs up to 5 parallel **read-only** researchers (no writes, no shell,
 no MCP) with fresh contexts; only their short reports return.
 
+## Local model (Ollama)
+
+The local backend talks to whatever model Ollama is serving — it doesn't bundle
+one. If your configured tag isn't pulled, it falls back to an installed model
+sharing the base name (`qwen3` → `qwen3:14b-16k`).
+
+**Quality defaults.** Sampling follows Qwen3's own recommendations
+(`temp 0.6 · top_p 0.95 · top_k 20 · min_p 0`) instead of Ollama's generic
+defaults, which the Qwen docs warn cause repetition and weaker reasoning. Context
+defaults to the **model's full native window** (a `:16k` tag keeps its 16k) rather
+than a fixed cap — set `AGENT_NUM_CTX` to override. Reasoning (`<think>`) defaults
+to **`auto`**: the harness turns it on for tasks that look hard and skips it for
+simple ones — a local approximation of Claude's adaptive thinking (which is trained
+into the cloud models and can't be added to qwen's weights). Force it with
+`AGENT_OLLAMA_THINK=1`/`0`.
+
+| Var | Effect |
+|---|---|
+| `AGENT_OLLAMA_TEMP` `AGENT_OLLAMA_TOP_P` `AGENT_OLLAMA_TOP_K` `AGENT_OLLAMA_MIN_P` | sampling — tune quality vs. determinism |
+| `AGENT_NUM_CTX` | context window (unset = model's native window; larger = more VRAM) |
+| `AGENT_OLLAMA_THINK` | `auto` (default) lets the harness enable `<think>` reasoning only on tasks that look hard — a local approximation of Claude's adaptive thinking; `1` forces it always on (max quality), `0` always off (fastest) |
+| `AGENT_OLLAMA_KEEP_ALIVE` | `30m`/`-1` keeps the model resident; `0` unloads after each call to free VRAM |
+| `AGENT_OLLAMA_NUM_PREDICT` | cap tokens per reply (`-1` = unlimited) |
+
+**Better output beyond tuning** is an Ollama choice, not a code one: run a larger
+or higher-precision model. On a 16 GB GPU, `qwen3:14b` at a higher quant (e.g.
+`qwen3:14b-q8_0`) trades VRAM for accuracy; `qwen3:32b` needs more headroom. Pull
+it and point at it with `AGENT_OLLAMA_MODEL`. (To go *lighter* instead, pull a
+smaller variant like `qwen3:8b`.) There's no way to improve the weights themselves
+from this repo — that means a bigger model, a different quant, or a fine-tune.
+
 ## Safety model
 
 Workspace sandbox (`--anywhere` lifts) · diff-gated writes · session `/undo` ·
@@ -281,7 +312,9 @@ Env: `ANTHROPIC_API_KEY` `AGENT_MODEL` `AGENT_OLLAMA_MODEL` `OLLAMA_HOST`
 `TELEGRAM_BOT_TOKEN` `AGENT_COMPACT_TOKENS` `AGENT_HEARTBEAT_MIN` `AGENT_NUM_CTX`
 `ANTHROPIC_BASE_URL` `TELEGRAM_API_BASE` `AGENT_DASH_PORT` `AGENT_DASH_BIND`
 `AGENT_FALLBACK_LOCAL` `AGENT_BRAND` `AGENT_DAILY_BUDGET` `AGENT_DAEMON_MODEL`
-`AGENT_TICK_SEC` `AGENT_MAX_JOB_FAILS`
+`AGENT_TICK_SEC` `AGENT_MAX_JOB_FAILS` `AGENT_OLLAMA_KEEP_ALIVE` `AGENT_OLLAMA_THINK`
+`AGENT_OLLAMA_NUM_PREDICT` `AGENT_OLLAMA_TEMP` `AGENT_OLLAMA_TOP_P` `AGENT_OLLAMA_TOP_K`
+`AGENT_OLLAMA_MIN_P`
 `WHATSAPP_TOKEN` `WHATSAPP_PHONE_ID` `WHATSAPP_VERIFY_TOKEN` `WHATSAPP_APP_SECRET`
 `WHATSAPP_API_BASE`
 
