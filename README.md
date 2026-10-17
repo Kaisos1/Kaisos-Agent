@@ -280,6 +280,7 @@ into the cloud models and can't be added to qwen's weights). Force it with
 | `AGENT_OLLAMA_NUM_PREDICT` | cap tokens per reply (default `8192`; `-1` = unlimited, which lets a looping reply run forever) |
 | `AGENT_GAMING_FLAG` | background automation (jobs, watches, inbox, heartbeat) waits while this file exists (default `~/.cache/kaisos/gaming_mode`; `""` = never wait) |
 | `AGENT_GAMING_GRACE_SEC` | …and this long after it was last seen (default `600`) — a Steam self-update drops gaming mode for seconds |
+| `AGENT_STARTUP_HOLD_SEC` | …and this long after the daemon's first tick (default `120`) — at login the flag is gone until Big Picture sets it again; each step of a tick re-checks the hold |
 
 **Better output beyond tuning** is an Ollama choice, not a code one: run a larger
 or higher-precision model. On a 16 GB GPU, `qwen3:14b` at a higher quant (e.g.

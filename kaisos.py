@@ -134,6 +134,12 @@ GAMING_FLAG = os.path.expanduser(os.environ.get("AGENT_GAMING_FLAG", "~/.cache/k
 # started in that gap.
 GAMING_GRACE_SEC = int(os.environ.get("AGENT_GAMING_GRACE_SEC", 600))
 _gaming_seen = 0.0
+# ...and for this long after the daemon's first tick: at login the flag left by
+# the last session is cleared before Big Picture brings it back (~20 s later),
+# and a daemon that had never seen it ran its whole backlog through the model
+# while Steam started (2026-10-17: GPU 96% busy, 9.5 GB VRAM, at both logins).
+STARTUP_HOLD_SEC = int(os.environ.get("AGENT_STARTUP_HOLD_SEC", 120))
+_first_tick = 0.0
 
 def gaming_hold() -> bool:
     """True while background automation should leave the GPU to a game."""
@@ -2013,13 +2019,17 @@ def _desktop_notify(title: str, body: str):
 
 def daemon_tick(notify=None):
     """One pass of all automation: due jobs, file watches, inbox, heartbeat."""
-    # every step below can load the model into the VRAM a game is using
-    if AUTOMATION_PAUSED or gaming_hold():
+    global _first_tick
+    _first_tick = _first_tick or time.time()
+    if GAMING_FLAG and time.time() - _first_tick < STARTUP_HOLD_SEC:
         return
-    run_due_jobs(notify)
-    run_watches(notify)
-    process_inbox(notify)
-    run_heartbeat(notify)
+    # every step below can load the model into the VRAM a game is using, and
+    # each can take a minute — a game that starts meanwhile holds the rest
+    # (the heartbeat used to run right after a job, into a fresh gaming mode)
+    for step in (run_due_jobs, run_watches, process_inbox, run_heartbeat):
+        if AUTOMATION_PAUSED or gaming_hold():
+            return
+        step(notify)
 
 # ════════════════════════════════════════════════════════════════════
 #  WEB DASHBOARD + CHAT — token-authenticated cockpit, zero dependencies

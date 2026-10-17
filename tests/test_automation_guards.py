@@ -29,16 +29,20 @@ class Base(unittest.TestCase):
         self.ws = pathlib.Path(self.tmp.name)
         self.flag = self.ws / "gaming_mode"
         self._saved = (k.WORKSPACE, k.GAMING_FLAG, k.GAMING_GRACE_SEC, k._gaming_seen,
+                       k.STARTUP_HOLD_SEC, k._first_tick,
                        k.run_background, k.run_watches, k.process_inbox, k.run_heartbeat)
         k.WORKSPACE = self.ws
         k.GAMING_FLAG = str(self.flag)
         k.GAMING_GRACE_SEC = 0.3
         k._gaming_seen = 0.0
+        k.STARTUP_HOLD_SEC = 0
+        k._first_tick = 0.0
         self.ran = []
         k.run_background = lambda task, tag, notify=None: (self.ran.append(tag), ("ok", True))[1]
 
     def tearDown(self):
         (k.WORKSPACE, k.GAMING_FLAG, k.GAMING_GRACE_SEC, k._gaming_seen,
+         k.STARTUP_HOLD_SEC, k._first_tick,
          k.run_background, k.run_watches, k.process_inbox, k.run_heartbeat) = self._saved
         self.tmp.cleanup()
 
@@ -76,6 +80,30 @@ class GamingHold(Base):
         time.sleep(0.35)
         k.daemon_tick()
         self.assertEqual(steps, ["watches", "inbox", "heartbeat"])
+
+    def test_first_ticks_after_login_wait(self):
+        # at login the old flag is gone and Big Picture has not set the new one yet
+        steps = []
+        k.run_watches = lambda n=None: steps.append("watches")
+        k.process_inbox = lambda n=None: steps.append("inbox")
+        k.run_heartbeat = lambda n=None: steps.append("heartbeat")
+        k.STARTUP_HOLD_SEC = 0.3
+        k.daemon_tick()
+        self.assertEqual(steps, [], "the first tick ran before Big Picture could start")
+        time.sleep(0.35)
+        k.daemon_tick()
+        self.assertEqual(steps, ["watches", "inbox", "heartbeat"])
+
+    def test_a_game_starting_mid_tick_holds_the_rest(self):
+        steps = []
+        def watches_then_game(n=None):
+            steps.append("watches")
+            self.flag.touch()          # gaming mode starts while the watches run
+        k.run_watches = watches_then_game
+        k.process_inbox = lambda n=None: steps.append("inbox")
+        k.run_heartbeat = lambda n=None: steps.append("heartbeat")
+        k.daemon_tick()
+        self.assertEqual(steps, ["watches"])
 
     def test_batch_stops_when_a_game_starts(self):
         k.jobs_path().write_text(json.dumps([self.due_job("a"), self.due_job("b")]))
