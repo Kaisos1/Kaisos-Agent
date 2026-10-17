@@ -356,6 +356,9 @@ list_scheduled · cancel_scheduled — **plus anything your MCP servers expose.*
   jobs.lock      transient cross-process lock for the job store
 ```
 
+Tests (no model, no network, temp workspace): `python3 -m unittest discover -s tests` —
+the gaming hold, the schedule guard and the reply cap.
+
 ## License
 
 Apache License 2.0 — free to use, modify, and build on, including commercially.
