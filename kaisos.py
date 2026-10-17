@@ -124,9 +124,10 @@ DIFF_LINES = 80              # max preview lines in confirmations
 NUM_CTX = int(os.environ["AGENT_NUM_CTX"]) if os.environ.get("AGENT_NUM_CTX") else 0  # 0 = use the model's own context window (e.g. a :16k tag keeps its 16k)
 HEARTBEAT_MIN = int(os.environ.get("AGENT_HEARTBEAT_MIN", 30))   # 0 disables
 TICK_SEC = max(5, int(os.environ.get("AGENT_TICK_SEC", 20)))     # daemon poll interval
-# While this file exists (kaisos gaming mode) scheduled jobs wait: each one
-# loads a 7.5 GB model into the VRAM the game is using. They stay due and run
-# once it is gone. "" turns the deferral off.
+# While this file exists (kaisos gaming mode) background automation — jobs,
+# watches, inbox, heartbeat — waits: each run loads a 7.5 GB model into the
+# VRAM the game is using. Jobs stay due and run once it is gone. Chats you
+# start yourself are not held. "" turns the deferral off.
 GAMING_FLAG = os.path.expanduser(os.environ.get("AGENT_GAMING_FLAG", "~/.cache/kaisos/gaming_mode"))
 # ...and for this long after it was last seen: Steam restarting itself for an
 # update closes Big Picture, gaming mode drops for ~12 s, and the whole backlog
