@@ -277,7 +277,8 @@ into the cloud models and can't be added to qwen's weights). Force it with
 | `AGENT_NUM_CTX` | context window (unset = model's native window; larger = more VRAM) |
 | `AGENT_OLLAMA_THINK` | `auto` (default) lets the harness enable `<think>` reasoning only on tasks that look hard — a local approximation of Claude's adaptive thinking; `1` forces it always on (max quality), `0` always off (fastest) |
 | `AGENT_OLLAMA_KEEP_ALIVE` | `30m`/`-1` keeps the model resident; `0` unloads after each call to free VRAM |
-| `AGENT_OLLAMA_NUM_PREDICT` | cap tokens per reply (`-1` = unlimited) |
+| `AGENT_OLLAMA_NUM_PREDICT` | cap tokens per reply (default `8192`; `-1` = unlimited, which lets a looping reply run forever) |
+| `AGENT_GAMING_FLAG` | scheduled jobs wait while this file exists (default `~/.cache/kaisos/gaming_mode`; `""` = never wait) |
 
 **Better output beyond tuning** is an Ollama choice, not a code one: run a larger
 or higher-precision model. On a 16 GB GPU, `qwen3:14b` at a higher quant (e.g.

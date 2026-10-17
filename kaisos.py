@@ -103,8 +103,10 @@ OLLAMA_KEEP_ALIVE = os.environ.get("AGENT_OLLAMA_KEEP_ALIVE", "")
 #   off (fast), "auto" lets the harness decide per request from task difficulty —
 #   a local approximation of Claude's trained adaptive thinking.
 OLLAMA_THINK = os.environ.get("AGENT_OLLAMA_THINK", "auto").lower()
-# num_predict: cap tokens per reply (-1 = unlimited, current behaviour).
-OLLAMA_NUM_PREDICT = int(os.environ.get("AGENT_OLLAMA_NUM_PREDICT", -1))
+# num_predict: cap tokens per reply (-1 = unlimited). Unlimited plus the
+#   runner's context shift let a looping reply run forever: on 2026-10-17 a
+#   scheduled job generated 62k tokens over 15 min on the GPU mid-game.
+OLLAMA_NUM_PREDICT = int(os.environ.get("AGENT_OLLAMA_NUM_PREDICT", 8192))
 # sampling: defaults follow Qwen3's own recommendations (better than Ollama's
 # generic defaults, which the Qwen docs warn cause repetition / weaker reasoning).
 OLLAMA_TEMP = float(os.environ.get("AGENT_OLLAMA_TEMP", 0.6))
@@ -122,6 +124,10 @@ DIFF_LINES = 80              # max preview lines in confirmations
 NUM_CTX = int(os.environ["AGENT_NUM_CTX"]) if os.environ.get("AGENT_NUM_CTX") else 0  # 0 = use the model's own context window (e.g. a :16k tag keeps its 16k)
 HEARTBEAT_MIN = int(os.environ.get("AGENT_HEARTBEAT_MIN", 30))   # 0 disables
 TICK_SEC = max(5, int(os.environ.get("AGENT_TICK_SEC", 20)))     # daemon poll interval
+# While this file exists (kaisos gaming mode) scheduled jobs wait: each one
+# loads a 7.5 GB model into the VRAM the game is using. They stay due and run
+# once it is gone. "" turns the deferral off.
+GAMING_FLAG = os.path.expanduser(os.environ.get("AGENT_GAMING_FLAG", "~/.cache/kaisos/gaming_mode"))
 MAX_JOB_FAILS = max(1, int(os.environ.get("AGENT_MAX_JOB_FAILS", 5)))  # auto-disable recurring job after N consecutive failures
 MAX_WATCHES = 10
 PARALLEL_TOOLS = 4
@@ -1840,6 +1846,8 @@ def _account(job, ok, msg):
 def run_due_jobs(notify=None) -> int:
     """Run all due scheduled jobs. Each completion mutates jobs.json freshly,
     so tasks that themselves schedule/cancel jobs are never clobbered."""
+    if GAMING_FLAG and os.path.exists(GAMING_FLAG):
+        return 0
     now = time.time()
     due = [j for j in _load_jobs()
            if j.get("kind", "schedule") == "schedule"
