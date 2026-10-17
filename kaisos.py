@@ -128,6 +128,21 @@ TICK_SEC = max(5, int(os.environ.get("AGENT_TICK_SEC", 20)))     # daemon poll i
 # loads a 7.5 GB model into the VRAM the game is using. They stay due and run
 # once it is gone. "" turns the deferral off.
 GAMING_FLAG = os.path.expanduser(os.environ.get("AGENT_GAMING_FLAG", "~/.cache/kaisos/gaming_mode"))
+# ...and for this long after it was last seen: Steam restarting itself for an
+# update closes Big Picture, gaming mode drops for ~12 s, and the whole backlog
+# started in that gap.
+GAMING_GRACE_SEC = int(os.environ.get("AGENT_GAMING_GRACE_SEC", 600))
+_gaming_seen = 0.0
+
+def gaming_hold() -> bool:
+    """True while background automation should leave the GPU to a game."""
+    global _gaming_seen
+    if not GAMING_FLAG:
+        return False
+    if os.path.exists(GAMING_FLAG):
+        _gaming_seen = time.time()
+        return True
+    return time.time() - _gaming_seen < GAMING_GRACE_SEC
 MAX_JOB_FAILS = max(1, int(os.environ.get("AGENT_MAX_JOB_FAILS", 5)))  # auto-disable recurring job after N consecutive failures
 MAX_WATCHES = 10
 PARALLEL_TOOLS = 4
@@ -1856,13 +1871,13 @@ def _account(job, ok, msg):
 def run_due_jobs(notify=None) -> int:
     """Run all due scheduled jobs. Each completion mutates jobs.json freshly,
     so tasks that themselves schedule/cancel jobs are never clobbered."""
-    if GAMING_FLAG and os.path.exists(GAMING_FLAG):
-        return 0
     now = time.time()
     due = [j for j in _load_jobs()
            if j.get("kind", "schedule") == "schedule"
            and not j.get("disabled") and j["next"] <= now]
     for job in due:
+        if gaming_hold():                    # a game started mid-batch: the rest wait
+            break
         out, ok = run_background(job["task"], job["id"], notify)
 
         def _settle(jobs, _id=job["id"], _ok=ok, _out=out):
@@ -1997,7 +2012,8 @@ def _desktop_notify(title: str, body: str):
 
 def daemon_tick(notify=None):
     """One pass of all automation: due jobs, file watches, inbox, heartbeat."""
-    if AUTOMATION_PAUSED:
+    # every step below can load the model into the VRAM a game is using
+    if AUTOMATION_PAUSED or gaming_hold():
         return
     run_due_jobs(notify)
     run_watches(notify)
