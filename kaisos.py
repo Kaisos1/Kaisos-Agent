@@ -926,8 +926,18 @@ def _fmt_ts(ts: float) -> str:
 
 def t_schedule_task(when: str, task: str) -> str:
     info = parse_when(when)
+    text = " ".join(task.split())
+    # A scheduled task is a prompt, not a tool call: "run_job arch_disk_alert"
+    # made each run schedule another copy, and 13 duplicates piled up by Oct.
+    if text.split(" ", 1)[0] in TOOLS:
+        raise ToolError(f"Describe the task in words; '{text.split(' ', 1)[0]}' is a tool, "
+                        "call it from the task instead of naming it as the task.")
+    dup = next((j for j in _load_jobs() if j.get("kind", "schedule") == "schedule"
+                and not j.get("disabled") and j.get("task") == text), None)
+    if dup:
+        return f"Already scheduled as [{dup['id']}] ({dup.get('when')}) — not added again."
     job = {"id": os.urandom(4).hex(), "kind": "schedule",
-           "task": " ".join(task.split()), "when": when, **info, "created": time.time()}
+           "task": text, "when": when, **info, "created": time.time()}
     _mutate_jobs(lambda jobs: jobs + [job])
     kind = "recurring" if job["recurring"] else "one-off"
     return (f"Scheduled [{job['id']}] ({kind}) — next run {_fmt_ts(job['next'])}. "
